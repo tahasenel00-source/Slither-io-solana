@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Slither.io Clone - Loonride Example</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+    <style>
+    html, body { height: 100%; }
+    body { margin: 0; background: #111; color: #eee; font-family: Arial, sans-serif; }
+    #game-root { position: relative; width: 100%; height: 100%; overflow: hidden; }
+    #menu-overlay {
+        position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+        background: rgba(0,0,0,0.65); z-index: 10;
+    }
+    #menu {
+        background: rgba(20,20,20,0.95); border: 1px solid #333; border-radius: 12px; padding: 24px; width: 360px;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    }
+    #menu h1 { margin: 0 0 8px 0; font-size: 22px; }
+    #menu p { margin: 0 0 16px 0; color: #bbb; font-size: 14px; }
+    .btn { width: 100%; padding: 12px 14px; margin: 8px 0; border: 0; border-radius: 8px; cursor: pointer; font-weight: 700; }
+    .btn-primary { background: #6c5ce7; color: #fff; }
+    .btn-secondary { background: #2d3436; color: #fff; }
+    .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+    #hud { position: absolute; top: 10px; left: 10px; display: flex; gap: 8px; align-items: center; z-index: 5; }
+    #hud .pill { background: rgba(0,0,0,0.5); border: 1px solid #333; border-radius: 999px; padding: 6px 10px; font-size: 12px; }
+    #toast { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.8); color: #eee; padding: 8px 12px; border-radius: 6px; font-size: 12px; display: none; z-index: 20; }
+    </style>
+    <script src="lib/phaser.min.js"></script>
+    <script src="src/game.js"></script>
+    <script src="src/snake.js"></script>
+    <script src="src/playerSnake.js"></script>
+    <script src="src/botSnake.js"></script>
+    <script src="src/eye.js"></script>
+    <script src="src/eyePair.js"></script>
+    <script src="src/shadow.js"></script>
+    <script src="src/food.js"></script>
+    <script src="src/util.js"></script>
+    <!-- socket.io client -->
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" integrity="sha384-JnK6wJeE7b9tFLC3C8bG0o7kktR9w0i4t8+YdA2F/0qj5hQ6v3dVIlTnnylQmQYB" crossorigin="anonymous"></script>
+    <script src="src/network.js"></script>
+    <!-- Solana Web3 (IIFE for browser) mainnet -->
+    <script src="https://unpkg.com/@solana/web3.js@1.95.3/lib/index.iife.min.js"></script>
+</head>
+<body>
+    <div id="game-root">
+        <div id="hud">
+            <div id="wallet-pill" class="pill">Wallet: <span id="wallet-status">Not connected</span></div>
+            <div id="balance-pill" class="pill">Balance: <span id="token-balance">0</span></div>
+        </div>
+        <div id="menu-overlay">
+            <div id="menu">
+                <h1>Slither x MemeCoin</h1>
+                <p>Phantom ile bağlan, oyna ve coin topla.</p>
+                <label style="display:block; font-size:12px; color:#aaa; margin:8px 0 4px 2px;">Token Mint (Devnet)</label>
+                <input id="mint-input" type="text" placeholder="SPL Token Mint Address" style="width:100%; padding:10px; border-radius:8px; border:1px solid #333; background:#1e1e1e; color:#ddd;">
+                <button id="connect-btn" class="btn btn-primary">Phantom ile Bağlan</button>
+                <button id="play-btn" class="btn btn-secondary" disabled>Oyna</button>
+                <button id="fs-btn" class="btn">Tam Ekran</button>
+                <div style="margin-top:12px; color:#aaa; font-size:12px;">Off-chain Test:</div>
+                <div style="display:flex; gap:8px;">
+                    <input id="dep-amt" type="number" min="1" value="10" style="flex:1; padding:10px; border-radius:8px; border:1px solid #333; background:#1e1e1e; color:#ddd;">
+                    <button id="dep-btn" class="btn">Deposit (manual sig)</button>
+                    <button id="dep-quick-btn" class="btn btn-primary">Quick Deposit</button>
+                </div>
+                <div style="display:flex; gap:8px; margin-top:6px;">
+                    <input id="wd-amt" type="number" min="1" value="5" style="flex:1; padding:10px; border-radius:8px; border:1px solid #333; background:#1e1e1e; color:#ddd;">
+                    <button id="wd-btn" class="btn">Withdraw</button>
+                </div>
+            </div>
+        </div>
+        <div id="toast"></div>
+    </div>
+    <script>
+    (function() {
+        var API_BASE = 'http://localhost:3001';
+        var TOKEN_MINT = null;
+        var TOKEN_DECIMALS = 6;
+        var TREASURY_PUBKEY = null;
+        var RPC_URL = 'https://api.devnet.solana.com';
+        var connection = new solanaWeb3.Connection(RPC_URL, 'confirmed');
+        var wallet = { publicKey: null };
+        var game = null;
+        var serverBalance = null; // from WS
+        var localBalance = 0;     // from gameplay
+
+        function showToast(msg) {
+            var t = document.getElementById('toast');
+            t.textContent = msg; t.style.display = 'block';
+            setTimeout(function(){ t.style.display = 'none'; }, 2000);
+        }
+
+        function shortKey(k) { if (!k) return '—'; var s = k.toString(); return s.slice(0,4)+'…'+s.slice(-4); }
+
+        function updateHUD() {
+            var ws = document.getElementById('wallet-status');
+            ws.textContent = wallet.publicKey ? ('Connected: ' + shortKey(wallet.publicKey)) : 'Not connected';
+        }
+
+        function updateBalancePill() {
+            var el = document.getElementById('token-balance');
+            if (typeof serverBalance === 'number') {
+                el.textContent = String(serverBalance);
+            } else {
+                el.textContent = String(localBalance);
+            }
+        }
+
+        async function loadServerConfig(){
+            try {
+                var res = await fetch(API_BASE + '/config');
+                var cfg = await res.json();
+                if (cfg && cfg.rpcUrl) { RPC_URL = cfg.rpcUrl; connection = new solanaWeb3.Connection(RPC_URL, 'confirmed'); }
+                if (cfg && cfg.tokenMint) TOKEN_MINT = cfg.tokenMint;
+                if (cfg && typeof cfg.tokenDecimals === 'number') TOKEN_DECIMALS = cfg.tokenDecimals;
+                if (cfg && cfg.treasuryPubkey) TREASURY_PUBKEY = cfg.treasuryPubkey;
+            } catch(e) {}
+        }
+
+        async function refreshTokenBalance() {
+            var el = document.getElementById('token-balance');
+            try {
+                if (!wallet.publicKey || !TOKEN_MINT) { el.textContent = '0'; return; }
+                var owner = new solanaWeb3.PublicKey(wallet.publicKey);
+                var mint = new solanaWeb3.PublicKey(TOKEN_MINT);
+                var resp = await connection.getParsedTokenAccountsByOwner(owner, { mint: mint });
+                var total = 0;
+                resp.value.forEach(function(acc){
+                    var info = acc.account.data.parsed.info; var amt = info.tokenAmount.uiAmount || 0; total += amt;
+                });
+                el.textContent = String(total);
+            } catch (e) { el.textContent = '—'; }
+        }
+
+        async function connectPhantom() {
+            try {
+                if (!window.solana || !window.solana.isPhantom) {
+                    showToast('Phantom bulunamadı. Lütfen Phantom kurun.');
+                    return;
+                }
+                var res = await window.solana.connect();
+                wallet.publicKey = res.publicKey.toString();
+                updateHUD();
+                refreshTokenBalance();
+                document.getElementById('play-btn').disabled = false;
+                showToast('Bağlandı');
+                // send auth if WS is already connected
+                try { if (window.GameNetwork && window.GameNetwork.isConnected && window.GameNetwork.isConnected()) { window.GameNetwork.send('auth', { wallet: wallet.publicKey }); } } catch(e) {}
+            } catch (e) {
+                showToast('Bağlantı reddedildi');
+            }
+        }
+
+        function startGame() {
+            // config already loaded
+            if (!game) {
+                game = new Phaser.Game(window.innerWidth, window.innerHeight, Phaser.AUTO, document.getElementById('game-root'));
+                game.state.add('Game', Game);
+            }
+            game.state.start('Game');
+            // ensure resume from pause when re-entering
+            try { if (game && game.paused) { game.paused = false; } } catch(e) {}
+            var overlay = document.getElementById('menu-overlay');
+            if (overlay) overlay.style.display = 'none';
+            // try to resize game with window
+            window.addEventListener('resize', function(){
+                if (game) { game.scale.setGameSize(window.innerWidth, window.innerHeight); }
+            });
+            // optional: connect to local WS server for realtime (non-blocking)
+            if (window.GameNetwork && !window.GameNetwork.isConnected()) {
+                window.GameNetwork.connect('http://localhost:3001', function(){
+                    console.log('WS connected');
+                    try { if (wallet.publicKey) { window.GameNetwork.send('auth', { wallet: wallet.publicKey }); } } catch(e) {}
+                }, function(msg){
+                    try{
+                        var d=JSON.parse(msg);
+                        if (d.type==='balance'&&d.payload){ serverBalance = d.payload.balance; updateBalancePill(); }
+                    } catch(e){}
+                }, function(){
+                    console.log('WS closed'); serverBalance = null; updateBalancePill();
+                });
+            }
+        }
+
+        function toggleFullscreen() {
+            if (!document.fullscreenElement) {
+                var root = document.documentElement; root.requestFullscreen && root.requestFullscreen();
+            } else {
+                document.exitFullscreen && document.exitFullscreen();
+            }
+        }
+
+        document.getElementById('connect-btn').addEventListener('click', connectPhantom);
+        document.getElementById('play-btn').addEventListener('click', startGame);
+        document.getElementById('fs-btn').addEventListener('click', function(){ toggleFullscreen(); });
+        document.getElementById('dep-btn').addEventListener('click', async function(){
+            // expects user to have sent SPL tokens to treasury; paste signature to confirm
+            var sig = prompt('Devnet deposit tx signature (Phantomda gonderdikten sonra):');
+            var v = parseInt(document.getElementById('dep-amt').value||'0', 10) || 0;
+            if (!sig) { showToast('Imza gerekli'); return; }
+            if (!window.GameNetwork || !window.GameNetwork.isConnected() || !window.GameNetwork.id()) { showToast('WS bagli degil'); return; }
+            try {
+                var resp = await fetch(API_BASE + '/deposit-confirm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ socketId: window.GameNetwork.id(), wallet: wallet.publicKey, amount: v, signature: sig }) });
+                var json = await resp.json();
+                if (json && json.ok) { showToast('Deposit onaylandi'); }
+                else { showToast('Deposit hatasi'); }
+            } catch(e){ showToast('Deposit hatasi'); }
+        });
+        document.getElementById('dep-quick-btn').addEventListener('click', async function(){
+            try {
+                if (!wallet.publicKey) { showToast('Phantom bagli degil'); return; }
+                await loadServerConfig();
+                if (!TOKEN_MINT || !TREASURY_PUBKEY) { console.error('Config missing', { TOKEN_MINT, TREASURY_PUBKEY }); showToast('Sunucu konfig eksik'); return; }
+                var v = parseInt(document.getElementById('dep-amt').value||'0', 10) || 0;
+                var resp = await fetch(API_BASE + '/deposit-intent', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ wallet: wallet.publicKey, amount: v }) });
+                var json = await resp.json();
+                if (!json || !json.ok || !json.tx) { console.error('intent error', json); showToast('Intent hatasi'); return; }
+                var tx = solanaWeb3.Transaction.from(Buffer.from(json.tx, 'base64'));
+                // Ensure fee payer set correctly
+                try { tx.feePayer = new solanaWeb3.PublicKey(wallet.publicKey); } catch(e) {}
+                var sent = await window.solana.signAndSendTransaction(tx);
+                if (!sent || !sent.signature) { console.error('send fail', sent); showToast('Gonderim basarisiz'); return; }
+                // wait for confirmation to ensure /deposit-confirm sees the tx
+                try { await connection.confirmTransaction(sent.signature, 'confirmed'); } catch(e) {}
+                var conf = await fetch(API_BASE + '/deposit-confirm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ socketId: window.GameNetwork.id(), wallet: wallet.publicKey, amount: v, signature: sent.signature }) });
+                var confJson = await conf.json();
+                if (confJson && confJson.ok) { showToast('Deposit onaylandi'); }
+                else { console.error('confirm error', confJson); showToast('Deposit onay hatasi'); }
+            } catch(e) { console.error('quick deposit exception', e); showToast('Quick deposit hatasi'); }
+        });
+        document.getElementById('wd-btn').addEventListener('click', async function(){
+            if (!window.GameNetwork || !window.GameNetwork.isConnected() || !window.GameNetwork.id()) { showToast('WS bagli degil'); return; }
+            try {
+                var resp = await fetch(API_BASE + '/withdraw', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ socketId: window.GameNetwork.id(), wallet: wallet.publicKey }) });
+                var json = await resp.json();
+                if (json && json.ok) { showToast('Withdraw gonderildi'); }
+                else { showToast('Withdraw hatasi'); }
+            } catch(e){ showToast('Withdraw hatasi'); }
+        });
+
+        // Initial HUD and config
+        updateHUD();
+        loadServerConfig();
+        setInterval(refreshTokenBalance, 8000);
+        // Optional: auto-enable Play if no wallet requirement for testing
+        // document.getElementById('play-btn').disabled = false;
+
+        // Expose UI bridge for Phaser game to push balances
+        window.GameUI = {
+            setBalances: function(obj){
+                if (obj && typeof obj.local === 'number') localBalance = obj.local;
+                if (obj && typeof obj.server === 'number') serverBalance = obj.server;
+                updateBalancePill();
+            }
+        };
+    })();
+    </script>
+</body>
+</html>
